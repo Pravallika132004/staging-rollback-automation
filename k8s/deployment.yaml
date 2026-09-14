@@ -1,80 +1,60 @@
-name: Staging Rollback Automation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: staging-app
+  namespace: staging
+  labels:
+    app: staging-app
+spec:
+  replicas: 2
 
-on:
-  workflow_dispatch:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
 
-jobs:
-  rollback-test:
-    runs-on: ubuntu-latest
+  selector:
+    matchLabels:
+      app: staging-app
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+  template:
+    metadata:
+      labels:
+        app: staging-app
 
-      - name: Create Kubernetes cluster
-        uses: helm/kind-action@v1
-        with:
-          cluster_name: staging-cluster
+    spec:
+      containers:
+        - name: staging-app
+          image: pravalikaboppana3/staging-app:latest
+          imagePullPolicy: IfNotPresent
 
-      - name: Create staging namespace
-        run: |
-          kubectl create namespace staging
+          ports:
+            - containerPort: 5000
+              protocol: TCP
 
-      - name: Deploy staging application
-        run: |
-          kubectl apply -f k8s/deployment.yaml -n staging
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
 
-      - name: Wait for deployment
-        run: |
-          kubectl rollout status \
-            deployment/staging-app \
-            -n staging \
-            --timeout=60s
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
 
-      - name: Simulate bad deployment
-        run: |
-          kubectl set image \
-            deployment/staging-app \
-            staging-app=pravalikaboppana3/staging-app:bad-version \
-            -n staging
-
-      - name: Check rollout
-        id: rollout
-        continue-on-error: true
-        run: |
-          kubectl rollout status \
-            deployment/staging-app \
-            -n staging \
-            --timeout=30s
-
-      - name: Automatic rollback
-        if: steps.rollout.outcome == 'failure'
-        run: |
-          echo "Deployment failed."
-          echo "Starting automatic rollback..."
-
-          kubectl rollout undo \
-            deployment/staging-app \
-            -n staging
-
-          kubectl rollout status \
-            deployment/staging-app \
-            -n staging \
-            --timeout=60s
-
-      - name: Verify rollback
-        if: steps.rollout.outcome == 'failure'
-        run: |
-          echo "Pods:"
-          kubectl get pods -n staging
-
-          echo "Deployment:"
-          kubectl get deployment staging-app -n staging
-
-          echo "Current image:"
-          kubectl get deployment staging-app \
-            -n staging \
-            -o jsonpath="{.spec.template.spec.containers[0].image}"
-
-          echo ""
-          echo "Rollback verification completed successfully."
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
