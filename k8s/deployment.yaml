@@ -1,0 +1,80 @@
+name: Staging Rollback Automation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rollback-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Kubernetes cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: staging-cluster
+
+      - name: Create staging namespace
+        run: |
+          kubectl create namespace staging
+
+      - name: Deploy staging application
+        run: |
+          kubectl apply -f k8s/deployment.yaml -n staging
+
+      - name: Wait for deployment
+        run: |
+          kubectl rollout status \
+            deployment/staging-app \
+            -n staging \
+            --timeout=60s
+
+      - name: Simulate bad deployment
+        run: |
+          kubectl set image \
+            deployment/staging-app \
+            staging-app=pravalikaboppana3/staging-app:bad-version \
+            -n staging
+
+      - name: Check rollout
+        id: rollout
+        continue-on-error: true
+        run: |
+          kubectl rollout status \
+            deployment/staging-app \
+            -n staging \
+            --timeout=30s
+
+      - name: Automatic rollback
+        if: steps.rollout.outcome == 'failure'
+        run: |
+          echo "Deployment failed."
+          echo "Starting automatic rollback..."
+
+          kubectl rollout undo \
+            deployment/staging-app \
+            -n staging
+
+          kubectl rollout status \
+            deployment/staging-app \
+            -n staging \
+            --timeout=60s
+
+      - name: Verify rollback
+        if: steps.rollout.outcome == 'failure'
+        run: |
+          echo "Pods:"
+          kubectl get pods -n staging
+
+          echo "Deployment:"
+          kubectl get deployment staging-app -n staging
+
+          echo "Current image:"
+          kubectl get deployment staging-app \
+            -n staging \
+            -o jsonpath="{.spec.template.spec.containers[0].image}"
+
+          echo ""
+          echo "Rollback verification completed successfully."
