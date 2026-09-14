@@ -1,0 +1,94 @@
+name: Staging Rollback Automation
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  staging-rollback:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Kubernetes cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: staging-cluster
+
+      - name: Build Docker image
+        run: |
+          docker build -t staging-app:ci .
+
+      - name: Load Docker image into Kubernetes
+        run: |
+          kind load docker-image staging-app:ci --name staging-cluster
+
+      - name: Create staging namespace
+        run: |
+          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy staging application
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+
+      - name: Use CI image
+        run: |
+          kubectl set image deployment/staging-app \
+            staging-app=staging-app:ci \
+            -n staging
+
+      - name: Wait for healthy deployment
+        run: |
+          kubectl rollout status deployment/staging-app \
+            -n staging \
+            --timeout=120s
+
+      - name: Verify healthy pods
+        run: |
+          kubectl get pods -n staging
+          kubectl get deployment staging-app -n staging
+
+      - name: Simulate failed deployment
+        continue-on-error: true
+        run: |
+          kubectl set image deployment/staging-app \
+            staging-app=staging-app:bad-version \
+            -n staging
+
+          kubectl rollout status deployment/staging-app \
+            -n staging \
+            --timeout=30s
+
+      - name: Rollback failed deployment
+        if: failure()
+        run: |
+          echo "Failed deployment detected."
+          echo "Starting automatic rollback..."
+
+          kubectl rollout undo deployment/staging-app -n staging
+
+          kubectl rollout status deployment/staging-app \
+            -n staging \
+            --timeout=120s
+
+      - name: Verify rollback
+        run: |
+          echo "Final deployment status:"
+          kubectl get deployment staging-app -n staging
+
+          echo "Final pods:"
+          kubectl get pods -n staging
+
+          echo "Current image:"
+          kubectl get deployment staging-app \
+            -n staging \
+            -o jsonpath="{.spec.template.spec.containers[0].image}"
+
+          echo ""
+
+          echo "Rollback verification completed successfully."
